@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Data outputs (backtest CSVs, charts — large files, not for repo)
+data/
+
+# Logs
+*.log
+v17a_live.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit real credentials
+# config.py is included but only with placeholder values
