@@ -1,0 +1,194 @@
+// ============================================================
+// v17a CPR + EMA Sell Strategy — TradingView Indicator
+// Ports the Python backtest logic to Pine Script
+//
+// Logic:
+//   1. Compute Daily CPR + Pivot levels from prev day H/L/C
+//   2. Determine opening zone (where spot opened relative to levels)
+//   3. EMA(20) bias: price > EMA = bull, price < EMA = bear
+//   4. Signal:
+//        Bear zone + Bear EMA  → Sell CE (sell call option)
+//        Bull zone + Bull EMA  → Sell PE (sell put option)
+//
+// Zones (Marvel names):
+//   Thor          above R4
+//   Iron Man      R3 – R4
+//   Captain Marvel R2 – R3
+//   Spider-Man    R1 – R2
+//   Black Panther PDH – R1
+//   Hawkeye       TC  – PDH
+//   Vision        BC  – TC  (within CPR)
+//   Ant-Man       PDL – BC
+//   Black Widow   PDL – S1
+//   Hulk          S1  – S2
+//   Winter Soldier S2 – S3
+//   Loki          S3  – S4
+//   Thanos        below S4
+// ============================================================
+//@version=5
+indicator(title="v17a CPR + EMA Sell Signals", shorttitle="v17a", overlay=true)
+
+// ─── Inputs ─────────────────────────────────────────────────
+ema_len       = input.int(20,    "EMA Length",          group="Settings")
+show_levels   = input.bool(true, "Show Pivot Levels",   group="Display")
+show_zones    = input.bool(true, "Show Zone Label",     group="Display")
+show_cpr_band = input.bool(true, "Show CPR Band",       group="Display")
+show_signals  = input.bool(true, "Show Signals",        group="Display")
+signal_session = input.session("0916-1515", "Signal Window", group="Settings")
+
+// ─── Daily OHLC (previous day) ──────────────────────────────
+ph = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+pl = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+pc = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+
+// ─── CPR & Pivot calculations ───────────────────────────────
+pp  = (ph + pl + pc) / 3
+bc  = (ph + pl) / 2
+tc  = (2 * pp) - bc
+
+r1  = (2 * pp) - pl
+r2  = pp + (ph - pl)
+r3  = r1 + (ph - pl)
+r4  = r2 + (ph - pl)
+
+s1  = (2 * pp) - ph
+s2  = pp - (ph - pl)
+s3  = s1 - (ph - pl)
+s4  = s2 - (ph - pl)
+
+// Previous day high/low
+pdh = ph
+pdl = pl
+
+// ─── EMA ────────────────────────────────────────────────────
+ema20 = ta.ema(close, ema_len)
+
+// ─── Zone detection (uses daily open) ───────────────────────
+d_open = request.security(syminfo.tickerid, "D", open, lookahead=barmerge.lookahead_on)
+
+zone_above_r4      = d_open > r4
+zone_r3_r4         = d_open <= r4  and d_open > r3
+zone_r2_r3         = d_open <= r3  and d_open > r2
+zone_r1_r2         = d_open <= r2  and d_open > r1
+zone_pdh_r1        = d_open <= r1  and d_open > pdh
+zone_tc_pdh        = d_open <= pdh and d_open > tc
+zone_within_cpr    = d_open <= tc  and d_open >= bc
+zone_pdl_bc        = d_open <  bc  and d_open >= pdl
+zone_pdl_s1        = d_open <  pdl and d_open > s1
+zone_s1_s2         = d_open <= s1  and d_open > s2
+zone_s2_s3         = d_open <= s2  and d_open > s3
+zone_s3_s4         = d_open <= s3  and d_open > s4
+zone_below_s4      = d_open <= s4
+
+// ─── Zone bias (bear = upper half, bull = lower half) ────────
+bear_zone = zone_above_r4 or zone_r3_r4 or zone_r2_r3 or zone_r1_r2 or
+            zone_pdh_r1   or zone_tc_pdh
+bull_zone = zone_pdl_bc   or zone_pdl_s1 or zone_s1_s2 or zone_s2_s3 or
+            zone_s3_s4    or zone_below_s4
+neutral_zone = zone_within_cpr
+
+// ─── EMA bias ───────────────────────────────────────────────
+bull_ema = close > ema20
+bear_ema = close < ema20
+
+// ─── Signal logic ───────────────────────────────────────────
+in_session = not na(time(timeframe.period, signal_session))
+
+// Sell CE: bear zone + bear EMA (sell call, expect price to fall/stay)
+sell_ce_cond = bear_zone and bear_ema and in_session
+// Sell PE: bull zone + bull EMA (sell put, expect price to rise/stay)
+sell_pe_cond = bull_zone and bull_ema and in_session
+
+// Trigger only on first bar of day (opening signal)
+is_new_day    = ta.change(time("D")) != 0
+sell_ce_signal = sell_ce_cond and is_new_day and show_signals
+sell_pe_signal = sell_pe_cond and is_new_day and show_signals
+
+// ─── Zone label ─────────────────────────────────────────────
+zone_name =
+    zone_above_r4   ? "Thor (above R4)"          :
+    zone_r3_r4      ? "Iron Man (R3-R4)"          :
+    zone_r2_r3      ? "Captain Marvel (R2-R3)"    :
+    zone_r1_r2      ? "Spider-Man (R1-R2)"        :
+    zone_pdh_r1     ? "Black Panther (PDH-R1)"    :
+    zone_tc_pdh     ? "Hawkeye (TC-PDH)"          :
+    zone_within_cpr ? "Vision (CPR)"              :
+    zone_pdl_bc     ? "Ant-Man (PDL-BC)"          :
+    zone_pdl_s1     ? "Black Widow (PDL-S1)"      :
+    zone_s1_s2      ? "Hulk (S1-S2)"              :
+    zone_s2_s3      ? "Winter Soldier (S2-S3)"    :
+    zone_s3_s4      ? "Loki (S3-S4)"              :
+    zone_below_s4   ? "Thanos (below S4)"         : "Unknown"
+
+zone_color =
+    bear_zone   ? color.new(color.red,   75) :
+    bull_zone   ? color.new(color.green, 75) :
+    color.new(color.yellow, 75)
+
+// ─── Plot Pivot Levels ───────────────────────────────────────
+plot(show_levels ? r4  : na, "R4",  color=color.new(color.red,    30), linewidth=1, style=plot.style_line)
+plot(show_levels ? r3  : na, "R3",  color=color.new(color.red,    50), linewidth=1, style=plot.style_line)
+plot(show_levels ? r2  : na, "R2",  color=color.new(color.red,    60), linewidth=1, style=plot.style_line)
+plot(show_levels ? r1  : na, "R1",  color=color.new(color.red,    70), linewidth=1, style=plot.style_line)
+plot(show_levels ? pdh : na, "PDH", color=color.new(color.orange, 40), linewidth=1, style=plot.style_circles)
+
+// CPR band
+tc_plot = plot(show_cpr_band ? tc : na, "TC", color=color.new(color.blue, 40), linewidth=2)
+bc_plot = plot(show_cpr_band ? bc : na, "BC", color=color.new(color.blue, 40), linewidth=2)
+fill(tc_plot, bc_plot, color=color.new(color.blue, 85), title="CPR Band")
+
+plot(show_levels ? pdl : na, "PDL", color=color.new(color.teal,  40), linewidth=1, style=plot.style_circles)
+plot(show_levels ? s1  : na, "S1",  color=color.new(color.green, 70), linewidth=1)
+plot(show_levels ? s2  : na, "S2",  color=color.new(color.green, 60), linewidth=1)
+plot(show_levels ? s3  : na, "S3",  color=color.new(color.green, 50), linewidth=1)
+plot(show_levels ? s4  : na, "S4",  color=color.new(color.green, 30), linewidth=1)
+
+// ─── EMA ────────────────────────────────────────────────────
+plot(ema20, "EMA 20", color=color.new(color.purple, 20), linewidth=2)
+
+// ─── Signals ────────────────────────────────────────────────
+plotshape(sell_ce_signal, title="Sell CE",
+    style=shape.arrowdown, location=location.abovebar,
+    color=color.new(color.red, 0), text="Sell CE\n" + zone_name,
+    textcolor=color.white, size=size.small)
+
+plotshape(sell_pe_signal, title="Sell PE",
+    style=shape.arrowup, location=location.belowbar,
+    color=color.new(color.green, 0), text="Sell PE\n" + zone_name,
+    textcolor=color.white, size=size.small)
+
+// ─── Background zone tint on new day ────────────────────────
+bgcolor(show_zones and is_new_day ? zone_color : na, title="Zone Background")
+
+// ─── Info table ──────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 6,
+    bgcolor=color.new(color.black, 70), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "Zone",      text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 0, zone_name,   text_color=zone_color == color.new(color.red, 75) ? color.red : zone_color == color.new(color.green, 75) ? color.lime : color.yellow, text_size=size.small)
+    table.cell(info, 0, 1, "Bias",      text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 1, bear_zone ? "BEAR" : bull_zone ? "BULL" : "NEUTRAL",
+        text_color=bear_zone ? color.red : bull_zone ? color.lime : color.yellow, text_size=size.small)
+    table.cell(info, 0, 2, "EMA",       text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 2, bull_ema ? "ABOVE (Bull)" : "BELOW (Bear)",
+        text_color=bull_ema ? color.lime : color.red, text_size=size.small)
+    table.cell(info, 0, 3, "Signal",    text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 3,
+        sell_ce_cond ? "SELL CE ▼" : sell_pe_cond ? "SELL PE ▲" : "No Signal",
+        text_color=sell_ce_cond ? color.red : sell_pe_cond ? color.lime : color.gray,
+        text_size=size.small)
+    table.cell(info, 0, 4, "CPR Width", text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 4, str.tostring(math.round((tc - bc) / close * 100, 3)) + "%",
+        text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 5, "PP",        text_color=color.gray,   text_size=size.small)
+    table.cell(info, 1, 5, str.tostring(math.round(pp, 2)),
+        text_color=color.white, text_size=size.small)
+
+// ─── Alerts ─────────────────────────────────────────────────
+alertcondition(sell_ce_signal, title="v17a Sell CE Signal",
+    message="v17a — SELL CE | Zone: {{zone_name}} | Price: {{close}}")
+alertcondition(sell_pe_signal, title="v17a Sell PE Signal",
+    message="v17a — SELL PE | Zone: {{zone_name}} | Price: {{close}}")
+alertcondition(sell_ce_signal or sell_pe_signal, title="v17a Any Signal",
+    message="v17a — {{sell_ce_signal ? 'SELL CE' : 'SELL PE'}} | Price: {{close}}")
